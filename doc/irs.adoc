@@ -1,0 +1,463 @@
+//// Fragment AsciiDoc sans titre de document : destiné à être inclus (include::) dans le
+//// document IRS consolidé de l'application MyFamilyBudget, avec un leveloffset ajusté
+//// par le document maître. Ne pas ajouter de ligne "= Titre" (niveau 0) dans ce fichier.
+////
+
+== Silo Analyse — Interface avec l'application MyFamilyBudget (IRS)
+
+Ce chapitre spécifie l'interface entre l'application MyFamilyBudget (modules `application` et
+`server`, ce dernier étant le composition root) et le silo Analyse (dépôt
+`myfamilybudget-domain-analysis`). Il décrit la nature de l'interaction, les données échangées
+et leur format, ainsi que le contrat de build et de compatibilité qui la gouverne.
+
+=== Conventions
+
+Les exigences d'interface de ce chapitre sont identifiées `MFB-ANA-INT-nnn` (`INT` pour
+interface), afin de ne pas être confondues avec les exigences fonctionnelles (`RF`) ou non
+fonctionnelles (`NRF`) du `srs.adoc` de ce même dépôt, tout en conservant le même préfixe
+applicatif `MFB-ANA-` pour une concaténation homogène. Chaque exigence comporte un identifiant et
+un titre, un texte, le cas échéant une note, sa méthode de vérification (`Vérification::`, voir
+la nomenclature Inspection/Analyse/Démonstration/Test définie dans `srs.adoc`), et une ligne
+`Amont::`.
+
+Certaines exigences de ce chapitre portent sur un comportement attendu côté application
+(responsabilités de traduction) : leur preuve ne se trouve pas dans ce dépôt mais dans celui de
+MyFamilyBudget. La ligne `Vérification::` le précise explicitement dans ce cas.
+
+=== Nature de l'interface
+
+[#MFB-ANA-INT-001]
+==== MFB-ANA-INT-001 — Interface intra-JVM, sans réseau ni sérialisation
+
+L'interaction entre l'application et le silo Analyse est un appel de méthode Java direct, dans
+le même processus et la même JVM. Il n'existe ni appel réseau, ni sérialisation/désérialisation
+(JSON, XML ou autre) à cette frontière : les objets échangés sont des instances Java (records
+immuables) passées par référence.
+
+Vérification:: Inspection — lecture du code de `analysis-api` (types Java échangés par
+référence) et de son `pom.xml` (absence de dépendance de sérialisation réseau).
+
+Amont:: SILO-155 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-ANA-INT-002]
+==== MFB-ANA-INT-002 — Sens unique de l'appel
+
+L'application appelle le silo Analyse ; le silo Analyse n'appelle jamais, directement ou
+indirectement, de code de l'application ou d'un autre silo (aucun callback, aucune interface de
+rappel déclarée côté `analysis-api`).
+
+Vérification:: Inspection — revue des signatures de `analysis-api` : aucune interface de
+callback ni de paramètre fonctionnel orienté application.
+
+Amont:: SILO-133 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-ANA-INT-003]
+==== MFB-ANA-INT-003 — Appel synchrone et bloquant
+
+`AnalyseCalculationService.computeAnalyse(AnalyseInput)` est un appel synchrone : il renvoie le
+résultat complet directement, sans `Future`, sans callback asynchrone, et sans état intermédiaire
+observable par l'appelant pendant le calcul.
+
+Vérification:: Inspection — lecture de la signature de la méthode (type de retour direct
+`AnalyseResultModel`, absence de `Future`/`CompletableFuture`).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-INT-004]
+==== MFB-ANA-INT-004 — Fonction pure, sans effet de bord
+
+Le silo Analyse ne lit ni n'écrit aucune donnée persistante (aucune base de données, aucun
+fichier, aucun appel réseau) lors du traitement de l'appel : son résultat ne dépend que de
+l'entrée fournie, et son exécution n'a aucun effet observable en dehors de la valeur renvoyée.
+
+NOTE: Conséquence directe : l'implémentation (`DefaultAnalyseCalculationService`) ne porte aucun
+champ d'état. La conséquence pratique (sûreté d'appel concurrent par plusieurs threads
+applicatifs sans synchronisation côté silo) est, elle, testable par Test si un test de
+concurrence est ajouté.
+
+Vérification:: Analyse — revue du code de `DefaultAnalyseCalculationService` (absence de champ
+d'instance mutable, absence d'accès disque/réseau/BD).
+
+Amont:: SILO-133 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+=== Point d'entrée exposé
+
+[#MFB-ANA-INT-005]
+==== MFB-ANA-INT-005 — Unique point d'entrée
+
+Le silo Analyse n'expose qu'un unique point d'entrée vers l'application : l'interface
+`com.moe.myfamilybudget.domain.analysis.calculation.AnalyseCalculationService`, méthode
+`AnalyseResultModel computeAnalyse(AnalyseInput input)`.
+
+Vérification:: Inspection — revue du package `calculation` de `analysis-api` : une seule
+interface de service y est déclarée.
+
+Amont:: SILO-155 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-ANA-INT-006]
+==== MFB-ANA-INT-006 — Implémentation non visible de l'application
+
+`DefaultAnalyseCalculationService` (module `analysis-core`) n'est visible et instanciable que
+depuis le composition root de l'application (module `server`) ; le module `application` ne
+connaît et ne dépend que de l'interface et des types portés par `analysis-api`.
+
+Vérification:: Inspection — côté MyFamilyBudget (hors de ce dépôt), lecture de
+`application/pom.xml` (absence de dépendance vers `analysis-core`).
+
+Amont:: SILO-155 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-ANA-INT-007]
+==== MFB-ANA-INT-007 — Câblage par le composition root
+
+Le composition root de l'application déclare le bean Spring portant l'implémentation du silo
+(hors de ce dépôt, typiquement une classe de configuration dédiée) ; le moteur de calcul lui-même
+n'est pas annoté comme composant Spring (`@Component`).
+
+Vérification:: Inspection — côté MyFamilyBudget (hors de ce dépôt), lecture de la classe de
+configuration du composition root déclarant le bean.
+
+Amont:: SILO-155 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+=== Modèle de données en entrée (`AnalyseInput`)
+
+[#MFB-ANA-INT-008]
+==== MFB-ANA-INT-008 — Structure du contrat d'entrée
+
+`AnalyseInput` est un record Java immuable à 7 champs, détaillés dans le tableau ci-dessous.
+Chaque champ non transmis (`null`) est remplacé par une valeur par défaut (voir
+`srs.adoc`, MFB-ANA-RF-002) : l'application n'a donc pas à garantir l'absence de `null`.
+
+[cols="1,2,3", options="header"]
+|===
+|Champ |Type |Description
+
+|`period`
+|`AnalysisPeriod(LocalDate today, int monthsBack)`
+|Date de référence et profondeur d'historique en mois (`0` = tout l'historique)
+
+|`transactions`
+|`List<AnalysisTransaction>`
+|Transactions bancaires de la fenêtre d'analyse
+
+|`categories`
+|`List<AnalysisCategory>`
+|Catégories bancaires (libellé, nature, compressible)
+
+|`matchings`
+|`List<AnalysisMatching>`
+|Rapprochements ligne budgétaire ↔ transactions, un élément par mois
+
+|`pendingOperations`
+|`List<AnalysisPendingOperation>`
+|Opérations en cours, non encore importées en transaction bancaire
+
+|`monthlyBudgetLines`
+|`List<MonthlyBudgetLines>`
+|Lignes budgétaires actives, un élément par mois de la fenêtre d'analyse
+
+|`lineKinds`
+|`List<BudgetLineKind>`
+|Nature (charge / revenu / placement) de chaque identifiant de ligne connu, y compris hors
+période active
+|===
+
+Vérification:: Test — `AnalyseInputTest` (structure et valeurs par défaut, cf. `srs.adoc`
+MFB-ANA-RF-002).
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-INT-009]
+==== MFB-ANA-INT-009 — Sous-structures du contrat d'entrée
+
+[cols="1,2", options="header"]
+|===
+|Type |Champs et format
+
+|`AnalysisTransaction`
+|`id` (clé des rapprochements), `date` (ISO `YYYY-MM-DD`), `amount` (`BigDecimal` signé, négatif
+pour un débit), `categoryId`, `splits` (`List<Split>`)
+
+|`AnalysisTransaction.Split`
+|`id` (référencé sous la forme `txId#splitId`), `categoryId`, `amount` (`BigDecimal` signé)
+
+|`AnalysisCategory`
+|`id`, `label`, `kind` (`"Dépense"` par défaut ou `"Revenu"`), `compressible` (`"Oui"`/`"Non"`,
+`"Non"` par défaut)
+
+|`AnalysisMatching`
+|`month` (`YYYY-MM`), `links` (`List<Link>`)
+
+|`AnalysisMatching.Link`
+|`budgetLineId`, `txIds` (`List<String>`, chaque élément `txId` ou `txId#splitId`)
+
+|`AnalysisPendingOperation`
+|`date` (ISO `YYYY-MM-DD`, vide si inconnue), `amount` (`BigDecimal` signé), `status`
+(`"pending"` par défaut), `budgetLineId`
+
+|`AnalysisBudgetLine`
+|`id`, `label`, `kind` (`"charge"` par défaut, `"revenu"` ou `"placement"`), `monthly`
+(`BigDecimal`, 2 décimales)
+
+|`MonthlyBudgetLines`
+|`monthISO` (`YYYY-MM`), `lines` (`List<AnalysisBudgetLine>`)
+
+|`BudgetLineKind`
+|`lineId`, `kind` (`"charge"`, `"revenu"` ou `"placement"`)
+
+|`AnalysisPeriod`
+|`today` (`LocalDate`, `LocalDate.now()` si `null`), `monthsBack` (`int`, ramené à `0` si négatif)
+|===
+
+Vérification:: Inspection — lecture des déclarations de records dans `analysis-api`.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-INT-010]
+==== MFB-ANA-INT-010 — Format des dates et des mois
+
+Toute date transportée en entrée est une chaîne au format ISO-8601 `YYYY-MM-DD` (ou une valeur
+`LocalDate` pour `AnalysisPeriod.today`). Tout mois est transporté sous forme de chaîne
+`YYYY-MM`. Le silo Analyse ne tente jamais de parser un autre format : une date dans un format
+différent est traitée comme une donnée ordinaire (comparaison lexicographique de chaînes), ce
+qui peut fausser silencieusement les filtres par coupure ou par mois.
+
+Vérification:: Analyse — relecture du code de filtrage/coupure (`DefaultAnalyseCalculationService`)
+confirmant une comparaison de chaînes sans parsing ni validation de format.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-INT-011]
+==== MFB-ANA-INT-011 — Identifiant composite transaction/ventilation
+
+Un identifiant de rapprochement référence soit une transaction entière (`txId`), soit une
+ventilation précise (`txId#splitId`). C'est le seul format d'identifiant composite reconnu par
+le silo ; l'application est responsable de produire des identifiants de transaction qui ne
+contiennent pas eux-mêmes le caractère `#`.
+
+Vérification:: Test — résolution testée via `resolveAmount` (cf. `srs.adoc`, MFB-ANA-RF-019).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-INT-012]
+==== MFB-ANA-INT-012 — Aucune contrainte d'échelle imposée en entrée
+
+Le silo Analyse n'impose aucune échelle (nombre de décimales) particulière aux `BigDecimal`
+fournis en entrée : il les consomme tels quels, et n'arrondit qu'en sortie (voir
+MFB-ANA-INT-014).
+
+Vérification:: Inspection — lecture du code : aucun `setScale` appliqué aux montants d'entrée
+avant calcul.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+=== Modèle de données en sortie (`AnalyseResultModel`)
+
+[#MFB-ANA-INT-013]
+==== MFB-ANA-INT-013 — Structure du résultat
+
+`AnalyseResultModel` est un record Java immuable à 7 champs :
+
+[cols="1,2,3", options="header"]
+|===
+|Champ |Type |Description
+
+|`kpis`
+|`AnalyseKpiModel`
+|KPI de synthèse (`totalExpenses`, `totalIncome`, `nbMonths`, `uncategorizedCount`,
+`compressibleTotal`)
+
+|`landingData`
+|`List<AnalyseLandingRowModel>`
+|Atterrissage du mois courant par ligne budgétaire (`id`, `label`, `kind`, `budgeted`, `reel`,
+`pct`, `status`, `pendingContrib`, `hasPendingContrib`)
+
+|`driftRows`
+|`List<AnalyseDriftRowModel>`
+|Dérives par ligne budgétaire (`id`, `label`, `kind`, `budgeted`, `avg3m`, `avg12m`, `ecart`,
+`ecartPct`, `status`, `months`)
+
+|`monthlyCompareData`
+|`List<AnalyseMonthlyCompareModel>`
+|Comparatif mensuel (`monthISO`, `label`, `budgeted`, `reel`, `hasPointing`)
+
+|`categorySummaries`
+|`List<AnalyseCategorySummaryModel>`
+|Résumé par catégorie (`label`, `amount`, `color`)
+
+|`currentMonthISO`
+|`String`
+|Mois courant au format `YYYY-MM`
+
+|`currentMonthLabel`
+|`String`
+|Libellé du mois courant en français (ex. `"novembre 2026"`)
+|===
+
+Vérification:: Test — couvert par les tests composant de `analysis-core` (cf. `srs.adoc`,
+MFB-ANA-RF-039).
+
+Amont:: RF-601 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-INT-014]
+==== MFB-ANA-INT-014 — Arrondi et échelle des montants en sortie
+
+Tout `BigDecimal` restitué dans `AnalyseResultModel` (ou l'un de ses sous-modèles) est arrondi à
+2 décimales, mode `HALF_UP`, à l'exception de `AnalyseDriftRowModel.avg3m`/`avg12m`/`ecart` qui
+peuvent être `null` en l'absence de moyenne calculable (voir `srs.adoc`, MFB-ANA-RF-036).
+
+Vérification:: Test.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-INT-015]
+==== MFB-ANA-INT-015 — Valeurs par défaut non nulles en sortie
+
+L'application peut itérer sans garde `null` sur les listes de `AnalyseResultModel` et lire ses
+champs scalaires : toute valeur non fournie est remplacée par une liste vide, un zéro ou une
+chaîne vide avant restitution (voir `srs.adoc`, MFB-ANA-RF-040).
+
+Vérification:: Test.
+
+Amont:: RF-601 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+=== Responsabilités de traduction côté application
+
+[#MFB-ANA-INT-016]
+==== MFB-ANA-INT-016 — Traduction des transactions bancaires
+
+L'application traduit les transactions de l'import bancaire (silo Banque/Pointage) vers
+`AnalysisTransaction` avant tout appel à `computeAnalyse` ; le silo Analyse ne reçoit et ne
+connaît aucun type du silo Banque/Pointage.
+
+Vérification:: Test — côté MyFamilyBudget (hors périmètre de ce dépôt), tests de la Factory
+applicative responsable de cette traduction (ex. `AnalyseInputFactory`).
+
+Amont:: SILO-133 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-ANA-INT-017]
+==== MFB-ANA-INT-017 — Traduction des lignes budgétaires
+
+L'application compose, pour chaque mois de la fenêtre d'analyse, les lignes budgétaires actives
+du silo Budget et les traduit vers `AnalysisBudgetLine`/`MonthlyBudgetLines`.
+
+Vérification:: Test — côté MyFamilyBudget (hors périmètre de ce dépôt).
+
+Amont:: SILO-133 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-ANA-INT-018]
+==== MFB-ANA-INT-018 — Fourniture de la nature de chaque ligne connue
+
+L'application fournit, via `lineKinds`, la nature (charge, revenu, placement) de chaque
+identifiant de charge, revenu et placement connu — y compris pour une ligne qui n'est plus
+active sur la fenêtre d'analyse mais dont l'historique de transactions pointées doit rester
+exploitable.
+
+Vérification:: Test — côté MyFamilyBudget (hors périmètre de ce dépôt).
+
+Amont:: SILO-133 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-ANA-INT-019]
+==== MFB-ANA-INT-019 — Fourniture explicite de la date du jour
+
+L'application fournit explicitement la date de référence via `AnalysisPeriod.today()` (en
+production, `LocalDate.now()`) : le silo Analyse ne lit jamais l'horloge système lui-même (voir
+`srs.adoc`, MFB-ANA-NRF-002).
+
+Vérification:: Inspection — côté MyFamilyBudget (hors périmètre de ce dépôt), revue du code de
+la Factory applicative confirmant un unique appel à `LocalDate.now()` avant transmission.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+=== Contrat de build et de distribution
+
+[#MFB-ANA-INT-020]
+==== MFB-ANA-INT-020 — Coordonnées Maven publiées
+
+Le silo Analyse est consommé par coordonnées Maven (`groupId com.moe.myfamilybudget`,
+`artifactId analysis-api`/`analysis-core`), publiées sur GitHub Packages
+(`https://maven.pkg.github.com/bulldozer27350/myfamilybudget-domain-analysis`) et référencées
+par le BOM applicatif (`back/pom.xml`, property dédiée à ce silo).
+
+Vérification:: Inspection — lecture de `distributionManagement` dans `pom.xml` et de la property
+correspondante dans le BOM applicatif.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-INT-021]
+==== MFB-ANA-INT-021 — Dépendance différenciée selon le module applicatif
+
+Le module `application` ne dépend que d'`analysis-api` (contrat, types, interface) ; seul le
+composition root (`server`) dépend en plus d'`analysis-core` (implémentation), pour pouvoir
+l'instancier et la câbler.
+
+Vérification:: Inspection — côté MyFamilyBudget (hors périmètre de ce dépôt), lecture de
+`application/pom.xml` et `server/pom.xml`.
+
+Amont:: SILO-155 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-ANA-INT-022]
+==== MFB-ANA-INT-022 — Visibilité JPMS exposée
+
+Seuls les packages `com.moe.myfamilybudget.domain.analysis.calculation` et
+`com.moe.myfamilybudget.domain.analysis.model` sont exportés par le module JPMS
+`com.moe.myfamilybudget.domain.analysis` (`analysis-api`) ; aucun package interne de
+`analysis-core` n'est exporté.
+
+Vérification:: Inspection — lecture de `analysis-api/src/main/java/module-info.java`.
+
+Amont:: SILO-155 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+=== Gestion des erreurs et robustesse de l'interface
+
+[#MFB-ANA-INT-023]
+==== MFB-ANA-INT-023 — Absence d'exception déclarée
+
+`AnalyseCalculationService.computeAnalyse` ne déclare aucune exception vérifiée (checked). Une
+entrée `null` ou partiellement renseignée est absorbée par les valeurs par défaut du contrat
+(voir `srs.adoc`, MFB-ANA-RF-001/RF-002) : elle ne provoque jamais de levée d'exception côté
+silo.
+
+Vérification:: Inspection (signature de la méthode) complétée par Test (cf. `srs.adoc`,
+MFB-ANA-RF-001 et MFB-ANA-RF-002, qui exercent concrètement cette absorption).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-INT-024]
+==== MFB-ANA-INT-024 — Pas de canal d'erreur dédié
+
+Il n'existe aucun code d'erreur, aucun champ de diagnostic, ni aucun canal d'erreur dédié à cette
+interface : toute anomalie de traduction en amont (silo Banque/Pointage, silo Budget vers
+Analyse) reste de la responsabilité de l'application appelante et doit être détectée avant
+l'appel à `computeAnalyse`.
+
+Vérification:: Inspection — revue des types de retour de `analysis-api` : aucun champ d'erreur,
+aucune exception déclarée.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+=== Compatibilité et évolution
+
+[#MFB-ANA-INT-025]
+==== MFB-ANA-INT-025 — Revue de compatibilité sur toute évolution du contrat
+
+Toute modification de forme d'`AnalyseInput`, de ses sous-types, ou d'`AnalyseResultModel` (ajout,
+retrait ou changement de type d'un champ) est un changement d'interface : elle doit faire l'objet
+d'une revue de compatibilité binaire (`japicmp-maven-plugin`) et d'un incrément de version SemVer
+conforme à la nature du changement (voir `srs.adoc`, MFB-ANA-NRF-006/NRF-008).
+
+Vérification:: Analyse — comparaison binaire outillée (`japicmp-maven-plugin`).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-INT-026]
+==== MFB-ANA-INT-026 — Contrat fermé vis-à-vis des autres silos
+
+Aucune évolution de cette interface ne doit introduire de dépendance, directe ou transitive,
+vers un type d'un autre silo métier : toute donnée nécessaire au calcul transite exclusivement
+par les types propres au silo Analyse, charge à l'application de la traduire (voir
+MFB-ANA-INT-016 à MFB-ANA-INT-018).
+
+Vérification:: Analyse — même évidence que `srs.adoc` MFB-ANA-NRF-001 (examen du graphe de
+dépendances), appliquée spécifiquement aux types traversant cette interface.
+
+Amont:: SILO-133 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)

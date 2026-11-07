@@ -1,0 +1,755 @@
+//// Fragment AsciiDoc sans titre de document : destiné à être inclus (include::) dans le
+//// document SRS consolidé de l'application MyFamilyBudget, avec un leveloffset ajusté
+//// par le document maître. Ne pas ajouter de ligne "= Titre" (niveau 0) dans ce fichier.
+////
+
+== Silo Analyse — Exigences fonctionnelles et non fonctionnelles
+
+Ce chapitre couvre les exigences du silo *Analyse* (dépôt `myfamilybudget-domain-analysis`,
+modules `analysis-api` et `analysis-core`) de l'application MyFamilyBudget. Le silo fournit le
+moteur de calcul de l'analyse Réel vs Prévisionnel (KPI de synthèse, atterrissage du mois
+courant, comparatif mensuel, dérives par ligne budgétaire) à partir d'un contrat d'entrée qui
+lui est propre (`AnalyseInput`), sans dépendre d'aucun autre silo métier ni d'aucun framework.
+
+=== Conventions
+
+Chaque exigence est identifiée par `MFB-ANA-RF-nnn` (exigence fonctionnelle) ou
+`MFB-ANA-NRF-nnn` (exigence non fonctionnelle), où :
+
+* `MFB` identifie l'application MyFamilyBudget (préfixe commun à tous les silos, pour une
+  concaténation homogène des exigences au niveau applicatif) ;
+* `ANA` identifie le silo Analyse ;
+* `RF`/`NRF` identifie la nature de l'exigence ;
+* `nnn` est un numéro séquentiel sur 3 chiffres, propre à ce dépôt.
+
+**Critère RF / NRF.** Une exigence est *fonctionnelle* (RF) si elle décrit un comportement
+observable en boîte noire au travers de `AnalyseCalculationService.computeAnalyse` (une entrée
+donnée produit un résultat donné) : c'est ce que le silo calcule pour ses consommateurs. Une
+exigence est *non fonctionnelle* (NRF) si elle porte sur un attribut de conception, de qualité
+ou de cycle de vie du composant (isolement architectural, build, versionnage, modularité...),
+indépendamment de ce critère de testabilité directe par appel.
+
+**Champ `Vérification::`.** Chaque exigence porte aussi sa méthode de vérification, selon la
+nomenclature **I/A/D/T** :
+
+[cols="1,3", options="header"]
+|===
+|Méthode |Définition retenue pour ce dépôt
+
+|*Inspection*
+|Examen direct d'un artefact (code source, fichier de configuration, type Java, documentation)
+sans exécution : il suffit de lire pour conclure.
+
+|*Analyse*
+|Raisonnement ou outillage statique appliqué au code ou aux artefacts compilés (graphe de
+dépendances, comparaison binaire `japicmp`, règle d'architecture type ArchUnit) sans exercer le
+comportement métier avec des données représentatives.
+
+|*Démonstration*
+|Exécution de l'ensemble (ou d'un pipeline) dans des conditions représentatives pour observer
+qu'il se comporte comme attendu, sans assertion exhaustive sur des données de test précises.
+
+|*Test*
+|Exécution contrôlée (`computeAnalyse` ou un type du contrat) avec des données d'entrée connues,
+comparaison quantitative/qualitative du résultat obtenu à un résultat attendu.
+|===
+
+Une exigence non fonctionnelle peut très bien être vérifiée par Test (ex. un comportement de
+robustesse), et une exigence dont la vérification exige une Inspection ou une Analyse n'est pas
+pour autant moins légitime : seule la méthode de preuve change, pas la nécessité de l'exigence.
+
+Chaque exigence comporte : un identifiant et un titre (en en-tête), un texte d'exigence, le cas
+échéant une note précisant un cas d'usage, sa méthode de vérification (`Vérification::`), et une
+ligne `Amont::` traçant la ou les exigences amont dont elle découle (ou `Aucune` si elle est
+propre à ce dépôt).
+
+=== Périmètre et principes du silo
+
+[#MFB-ANA-RF-001]
+==== MFB-ANA-RF-001 — Entrée absente traitée comme une entrée vide
+
+`AnalyseCalculationService.computeAnalyse(AnalyseInput)` doit accepter une entrée `null` et la
+traiter comme une entrée entièrement vide (aucune transaction, aucune catégorie, aucun
+rapprochement, aucune opération en cours, aucune ligne budgétaire, aucune nature de ligne,
+période par défaut), sans lever d'exception.
+
+Vérification:: Test — appel de `computeAnalyse(null)`, comparaison du résultat à celui obtenu
+avec un `AnalyseInput` dont tous les champs sont explicitement vides.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-RF-002]
+==== MFB-ANA-RF-002 — Valeurs par défaut du contrat d'entrée
+
+Chaque champ de `AnalyseInput`, s'il est transmis à `null`, doit être remplacé par une valeur par
+défaut non nulle avant tout calcul :
+
+[cols="1,2", options="header"]
+|===
+|Champ |Valeur par défaut si `null`
+
+|`period`
+|`AnalysisPeriod(null, 12)` (date du jour, 12 mois d'historique)
+
+|`transactions`
+|Liste vide
+
+|`categories`
+|Liste vide
+
+|`matchings`
+|Liste vide
+
+|`pendingOperations`
+|Liste vide
+
+|`monthlyBudgetLines`
+|Liste vide
+
+|`lineKinds`
+|Liste vide
+|===
+
+De même, dans `AnalysisPeriod`, un `today` à `null` est remplacé par `LocalDate.now()` et un
+`monthsBack` négatif est ramené à `0`.
+
+Vérification:: Test — construction de `AnalyseInput`/`AnalysisPeriod` champ par champ avec des
+valeurs `null`, assertion des valeurs par défaut obtenues (couvert par `AnalyseInputTest`).
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-003]
+==== MFB-ANA-RF-003 — Déterminisme du résultat vis-à-vis de l'instant d'exécution
+
+Pour un même `AnalyseInput` et une même valeur explicite de `AnalysisPeriod.today()`,
+`computeAnalyse` doit produire un résultat strictement identique quel que soit l'instant réel
+d'exécution.
+
+NOTE: Cette exigence est la contrepartie observable, côté consommateur, de l'interdiction faite au
+moteur de lire lui-même l'horloge système (voir MFB-ANA-NRF-002) : elle garantit en particulier
+qu'un résultat peut être mis en cache ou recalculé à l'identique en test, sans mock de temps.
+
+Vérification:: Test — deux appels à `computeAnalyse` avec le même `AnalyseInput`, exécutés à des
+instants réels différents, doivent renvoyer un résultat égal.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+=== Détermination de la fenêtre d'analyse
+
+[#MFB-ANA-RF-004]
+==== MFB-ANA-RF-004 — Calcul de la date de coupure (cutoff)
+
+Lorsque `monthsBack > 0`, les transactions antérieures à `today - monthsBack` (au jour près,
+format ISO `YYYY-MM-DD`) sont exclues de l'ensemble pris en compte pour les agrégats de
+synthèse et les moyennes réelles.
+
+Vérification:: Test — jeu de transactions à cheval sur la date de coupure, assertion des
+transactions retenues/exclues des KPI.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-005]
+==== MFB-ANA-RF-005 — Absence de coupure sur tout l'historique
+
+Lorsque `monthsBack = 0`, aucune coupure n'est appliquée : l'intégralité des transactions
+fournies en entrée est prise en compte pour les agrégats de synthèse.
+
+Vérification:: Test — `monthsBack = 0`, transaction très ancienne incluse dans les KPI.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-006]
+==== MFB-ANA-RF-006 — Nombre de mois retenu pour les KPI
+
+Le nombre de mois (`nbMonths`) restitué dans les KPI de synthèse vaut `monthsBack` si celui-ci
+est strictement positif, sinon `1` (valeur plancher).
+
+Vérification:: Test — `monthsBack` à `0`, `1`, et une valeur positive quelconque, assertion de
+`AnalyseKpiModel.nbMonths`.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+=== Résumé par catégorie et agrégats de synthèse (KPI)
+
+[#MFB-ANA-RF-007]
+==== MFB-ANA-RF-007 — Détection d'un montant de type revenu
+
+Une transaction (ou une ventilation) est considérée comme un revenu si sa catégorie est de
+nature `"Revenu"` (comparaison insensible à la casse), *ou* si son montant est strictement
+positif.
+
+NOTE: Un montant déclaré positif mais rattaché à une catégorie de dépense est tout de même
+traité comme un revenu par cette règle ; inversement, un montant négatif ou nul rattaché à une
+catégorie `"Revenu"` n'est ajouté ni au total des revenus (MFB-ANA-RF-008), ni aux dépenses par
+catégorie (MFB-ANA-RF-009) : il est silencieusement exclu des deux agrégats.
+
+Vérification:: Test — montant positif sur catégorie de dépense, montant négatif/nul sur
+catégorie `"Revenu"`, assertion de l'absence de contribution aux deux agrégats dans ce dernier
+cas.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-008]
+==== MFB-ANA-RF-008 — Agrégation du total des revenus
+
+Le total des revenus (`AnalyseKpiModel.totalIncome`) est la somme des seuls montants
+strictement positifs identifiés comme revenus (voir MFB-ANA-RF-007), sur l'ensemble de la
+fenêtre d'analyse.
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-009]
+==== MFB-ANA-RF-009 — Agrégation des dépenses par catégorie
+
+Pour tout montant non identifié comme revenu, son montant inversé (signe opposé) est ajouté au
+cumul de la catégorie correspondante, identifiée par son libellé.
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-010]
+==== MFB-ANA-RF-010 — Libellé par défaut des dépenses non catégorisées
+
+Une dépense dont la catégorie est absente, vide, ou non résolue dans la liste des catégories
+fournies, est agrégée sous le libellé `"Non catégorisé"`.
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-011]
+==== MFB-ANA-RF-011 — Comptage des dépenses non catégorisées
+
+`AnalyseKpiModel.uncategorizedCount` compte le nombre de dépenses (transactions ou ventilations)
+dont l'identifiant de catégorie est absent ou vide, indépendamment de son montant.
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-012]
+==== MFB-ANA-RF-012 — Agrégation du total des dépenses compressibles
+
+`AnalyseKpiModel.compressibleTotal` cumule les dépenses dont la catégorie est explicitement
+marquée compressible (`AnalysisCategory.compressible = "Oui"`, comparaison insensible à la
+casse). Une dépense sans catégorie résolue n'est jamais comptée comme compressible.
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-013]
+==== MFB-ANA-RF-013 — Traitement indépendant des ventilations
+
+Lorsqu'une transaction porte des ventilations (`splits`) non vides, chaque ventilation est
+traitée indépendamment des autres pour la détection revenu/dépense et l'agrégation par
+catégorie ; le montant global de la transaction n'est alors plus utilisé directement.
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-014]
+==== MFB-ANA-RF-014 — Exclusion des montants résiduels quasi nuls
+
+Une catégorie dont le cumul de dépenses, après arrondi à 2 décimales, a une valeur absolue
+inférieure ou égale à `0,01`, n'apparaît pas dans le résumé par catégorie et ne contribue pas au
+total des dépenses.
+
+Vérification:: Test.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-RF-015]
+==== MFB-ANA-RF-015 — Code couleur du résumé par catégorie
+
+Chaque entrée du résumé par catégorie porte une couleur d'affichage déterminée ainsi :
+
+[cols="2,1", options="header"]
+|===
+|Condition |Couleur
+
+|Cumul de la catégorie strictement négatif (net créditeur)
+|`#2F5D50`
+
+|Libellé = `"Non catégorisé"`
+|`#6B7278`
+
+|Tout autre cas
+|`#A8503C`
+|===
+
+Vérification:: Test.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-RF-016]
+==== MFB-ANA-RF-016 — Tri du résumé par catégorie
+
+Le résumé par catégorie (`categorySummaries`) est trié par montant décroissant.
+
+Vérification:: Test.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-RF-017]
+==== MFB-ANA-RF-017 — Arrondi des agrégats de synthèse
+
+Tous les montants des KPI de synthèse (`totalExpenses`, `totalIncome`, `compressibleTotal`) et
+du résumé par catégorie sont arrondis à 2 décimales, mode `HALF_UP`.
+
+Vérification:: Test.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+=== Données d'atterrissage du mois courant
+
+[#MFB-ANA-RF-018]
+==== MFB-ANA-RF-018 — Sélection des lignes actives du mois courant
+
+L'atterrissage du mois courant ne porte que sur les lignes budgétaires de
+`AnalyseInput.monthlyBudgetLines()` dont le `monthISO` correspond exactement au mois de
+`AnalysisPeriod.today()`.
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-019]
+==== MFB-ANA-RF-019 — Résolution d'un identifiant de rapprochement
+
+Un identifiant de rapprochement (`txId` ou `txId#splitId`) est résolu vers un montant signé :
+sans `#`, c'est le montant de la transaction identifiée par `txId` ; avec `#`, c'est le montant
+de la ventilation `splitId` de la transaction `txId`. Si la transaction, la ventilation, ou
+l'identifiant lui-même est introuvable ou vide, le montant résolu est zéro.
+
+Vérification:: Test.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-RF-020]
+==== MFB-ANA-RF-020 — Calcul du réel pointé d'une ligne
+
+Le réel pointé d'une ligne budgétaire active est la somme des montants résolus (MFB-ANA-RF-019)
+de tous les identifiants de rapprochement du mois courant liés à son identifiant. Pour une ligne
+de nature `"revenu"`, les montants sont additionnés tels quels ; pour toute autre nature
+(`"charge"`, `"placement"`), ils sont ajoutés avec le signe inversé.
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-021]
+==== MFB-ANA-RF-021 — Contribution des opérations en cours au réel du mois courant
+
+Une opération en cours (`AnalysisPendingOperation`) contribue au réel d'une ligne du mois
+courant si son statut est `"pending"` (insensible à la casse), si elle référence l'identifiant de
+la ligne, et si sa date est vide ou commence par le mois courant. Pour une ligne `"revenu"`, seule
+la part positive du montant est retenue (`max(montant, 0)`) ; pour les autres natures, sa valeur
+absolue est retenue.
+
+NOTE: Permet de refléter dans l'atterrissage du mois en cours une opération connue mais pas
+encore importée en transaction bancaire pointée.
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-022]
+==== MFB-ANA-RF-022 — Calcul du pourcentage d'atterrissage
+
+Lorsque le montant budgété d'une ligne est strictement positif, le pourcentage d'atterrissage
+est `réel / budgété × 100`, arrondi à 2 décimales, et plafonné à `100`. Lorsque le montant
+budgété n'est pas strictement positif, le pourcentage est `0`.
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-023]
+==== MFB-ANA-RF-023 — Tolérance de rapprochement budgété/réel
+
+L'écart entre réel et budgété est considéré comme négligeable (statut `"match"`) lorsque sa
+valeur absolue est inférieure ou égale à une tolérance définie comme `max(budgété × 2 %, 1 €)`.
+
+NOTE: Le plancher de 1 € évite qu'une ligne à très faible montant budgété tolère un écart
+proportionnellement énorme mais négligeable en valeur absolue.
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-024]
+==== MFB-ANA-RF-024 — Classification du statut d'atterrissage
+
+Lorsqu'au moins une donnée réelle existe pour la ligne (rapprochement non vide ou opération en
+cours positive), le statut d'atterrissage est déterminé ainsi :
+
+* `"match"` si l'écart est dans la tolérance (MFB-ANA-RF-023) ;
+* pour une ligne `"revenu"` ou `"placement"` : `"economy"` si le réel dépasse le budgété,
+  sinon `"over"` ;
+* pour une ligne `"charge"` : `"economy"` si le réel est inférieur au budgété, sinon `"over"`.
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-025]
+==== MFB-ANA-RF-025 — Statut d'attente en l'absence de donnée réelle
+
+Une ligne budgétaire active sans aucun rapprochement et sans contribution positive d'opération
+en cours porte le statut `"pending"`.
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-026]
+==== MFB-ANA-RF-026 — Tri des lignes d'atterrissage
+
+Les lignes d'atterrissage (`landingData`) sont triées par montant budgété décroissant.
+
+Vérification:: Test.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+=== Comparatif mensuel (historique budgeté vs réel)
+
+[#MFB-ANA-RF-027]
+==== MFB-ANA-RF-027 — Fenêtre du comparatif mensuel
+
+Le comparatif mensuel porte sur `min(monthsBack, 24)` mois si `monthsBack > 0`, sinon sur 12
+mois par défaut, se terminant au mois courant inclus.
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-028]
+==== MFB-ANA-RF-028 — Calcul du budgété mensuel
+
+Pour chaque mois de la fenêtre, le montant budgété est la somme des montants mensuels des lignes
+budgétaires actives de ce mois (`MonthlyBudgetLines` dont le `monthISO` correspond).
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-029]
+==== MFB-ANA-RF-029 — Calcul du réel mensuel
+
+Pour chaque mois, le réel est la somme des montants résolus (MFB-ANA-RF-019) de tous les
+rapprochements de ce mois, plus la contribution des opérations en cours du mois (même règle que
+MFB-ANA-RF-021), la nature de chaque ligne étant déterminée via `lineKinds` (nature `"charge"`
+par défaut si inconnue).
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-030]
+==== MFB-ANA-RF-030 — Indicateur de pointage du mois
+
+Un mois du comparatif porte `hasPointing = true` dès lors qu'au moins un rapprochement non vide
+existe pour ce mois, ou qu'une opération en cours y contribue positivement.
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-031]
+==== MFB-ANA-RF-031 — Libellé du mois dans le comparatif mensuel
+
+Chaque mois du comparatif porte un libellé affichable au format abrégé français (ex. `"janv.
+26"`, motif `MMM yy`, locale française).
+
+Vérification:: Test — assertion du libellé exact produit pour un mois connu.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+=== Dérives (réel moyen vs budgété)
+
+[#MFB-ANA-RF-032]
+==== MFB-ANA-RF-032 — Calcul de la moyenne réelle sur 3 mois
+
+Pour chaque ligne budgétaire ayant au moins un rapprochement, la moyenne réelle sur 3 mois
+(`avg3m`) est la moyenne arithmétique du réel des 3 mois les plus récents (parmi les mois
+antérieurs ou égaux au mois courant) pour lesquels un rapprochement existe pour cette ligne.
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-033]
+==== MFB-ANA-RF-033 — Calcul de la moyenne réelle sur 12 mois
+
+Pour chaque ligne budgétaire ayant au moins un rapprochement, la moyenne réelle sur 12 mois
+(`avg12m`) est la moyenne arithmétique du réel des 12 mois les plus récents (même filtre que
+MFB-ANA-RF-032) pour lesquels un rapprochement existe pour cette ligne. Le nombre de mois
+effectivement retenus est restitué (`AnalysisRealAverage.months`).
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-034]
+==== MFB-ANA-RF-034 — Exclusion des mois futurs des moyennes réelles
+
+Seuls les mois dont le code `YYYY-MM` est inférieur ou égal au mois courant entrent dans le
+calcul des moyennes réelles (MFB-ANA-RF-032, MFB-ANA-RF-033).
+
+Vérification:: Test.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-RF-035]
+==== MFB-ANA-RF-035 — Classification du statut de dérive
+
+Lorsqu'une moyenne sur 3 mois est calculable pour une ligne active du mois courant, l'écart
+(`avg3m - budgété`) est comparé à la même tolérance que MFB-ANA-RF-023, et le statut de dérive
+suit la même règle de classification que MFB-ANA-RF-024 (en substituant `avg3m` au réel). Le
+pourcentage d'écart (`ecartPct`) n'est calculé que si le budgété est strictement positif.
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-036]
+==== MFB-ANA-RF-036 — Statut d'attente en l'absence de moyenne 3 mois
+
+Si aucune moyenne sur 3 mois n'est calculable pour une ligne active du mois courant (aucun
+rapprochement historique), son écart et son pourcentage d'écart restent absents (`null`) et son
+statut de dérive est `"pending"`.
+
+Vérification:: Test.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+=== Règles communes
+
+[#MFB-ANA-RF-037]
+==== MFB-ANA-RF-037 — Règle de classification économie/dépassement selon la nature
+
+Pour toute comparaison réel/budgété (atterrissage MFB-ANA-RF-024 ou dérive MFB-ANA-RF-035), le
+sens de l'écart favorable est inversé selon la nature de la ligne : pour une ligne `"revenu"` ou
+`"placement"`, un réel supérieur au budgété est une `"economy"` ; pour une ligne `"charge"`,
+c'est l'inverse.
+
+Vérification:: Test.
+
+Amont:: RF-600 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-038]
+==== MFB-ANA-RF-038 — Arrondi systématique des montants de sortie
+
+Tout montant restitué dans les modèles de résultat (`AnalyseLandingRowModel`,
+`AnalyseDriftRowModel`, `AnalyseMonthlyCompareModel`) est arrondi à 2 décimales, mode `HALF_UP`.
+
+Vérification:: Test.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+=== Résultat exposé
+
+[#MFB-ANA-RF-039]
+==== MFB-ANA-RF-039 — Composition du résultat complet
+
+`computeAnalyse` restitue un `AnalyseResultModel` unique regroupant les KPI de synthèse
+(MFB-ANA-RF-007 à MFB-ANA-RF-017), les données d'atterrissage (MFB-ANA-RF-018 à MFB-ANA-RF-026),
+les lignes de dérive (MFB-ANA-RF-032 à MFB-ANA-RF-036), le comparatif mensuel (MFB-ANA-RF-027 à
+MFB-ANA-RF-031), le résumé par catégorie, ainsi que le code ISO et le libellé français du mois
+courant.
+
+Vérification:: Test.
+
+Amont:: RF-601 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-040]
+==== MFB-ANA-RF-040 — Valeurs par défaut non nulles du résultat
+
+Si `AnalyseResultModel` est construit avec un champ `null`, celui-ci est remplacé par une valeur
+par défaut non nulle (listes vides, KPI à zéro, chaînes vides pour les libellés de mois), afin
+qu'aucun consommateur n'ait à traiter de `null`.
+
+Vérification:: Test.
+
+Amont:: RF-601 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[#MFB-ANA-RF-041]
+==== MFB-ANA-RF-041 — Libellé français du mois courant
+
+`AnalyseResultModel.currentMonthLabel` est formaté selon le motif `"MMMM yyyy"` en locale
+française (ex. `"novembre 2026"` pour le mois de novembre 2026), à partir de
+`AnalysisPeriod.today()`.
+
+Vérification:: Test — assertion du libellé exact produit pour une date de référence connue.
+
+Amont:: RF-601 (MyFamilyBudget, `doc/architecture/08-domaine-analyse.md`)
+
+[[MFB-ANA-NFR-chapter]]
+=== Exigences non fonctionnelles
+
+[#MFB-ANA-NRF-001]
+==== MFB-ANA-NRF-001 — Isolement du silo Analyse
+
+Le moteur de calcul (`analysis-core`) et son contrat (`analysis-api`) ne dépendent, en
+compilation comme en exécution, d'aucun type appartenant aux silos Banque/Pointage ou Budget, ni
+du modèle persistant historique (`BudgetDataModel`, `PersistenceManager`), ni d'aucun framework
+(Spring, JPA, OpenAPI). Le silo n'opère que sur les types qu'il définit lui-même
+(`AnalysisTransaction`, `AnalysisCategory`, `AnalysisMatching`, `AnalysisPendingOperation`,
+`AnalysisBudgetLine`, `MonthlyBudgetLines`, `BudgetLineKind`).
+
+NOTE: Permet l'exécution et le test du moteur sans contexte Spring, sans base de données, et sans
+dépendance de compilation vers les autres silos métier ; la traduction depuis les modèles des
+autres silos est à la charge de l'application (voir `irs.adoc`, MFB-ANA-INT-016 à INT-018).
+C'est un attribut de conception (isolement architectural), pas un comportement observable par un
+appel à `computeAnalyse` : il ne se prouve pas par une assertion sur un résultat, d'où son
+classement en exigence non fonctionnelle.
+
+Vérification:: Analyse — examen du graphe de dépendances Maven déclarées (`analysis-core/pom.xml`)
+et des imports des sources Java ; automatisable par une règle d'architecture (ArchUnit) côté
+application, sur le modèle des gardes-fous d'isolement déjà en place pour les autres silos.
+
+Amont:: SILO-133 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-ANA-NRF-002]
+==== MFB-ANA-NRF-002 — Absence d'appel direct à l'horloge système dans le code
+
+Le code du moteur de calcul ne doit contenir aucun appel à `LocalDate.now()`, `Clock.*` ou
+équivalent : la date du jour lui est systématiquement fournie en entrée via
+`AnalysisPeriod.today()`. C'est à la Factory applicative (hors de ce dépôt) de fournir
+`LocalDate.now()` en production.
+
+NOTE: Cette exigence est l'exigence d'implémentation dont MFB-ANA-RF-003 (déterminisme du
+résultat) est la conséquence observable côté consommateur. Elle porte sur le code lui-même, pas
+sur un résultat d'appel, d'où sa vérification par Inspection plutôt que par Test.
+
+Vérification:: Inspection — revue du code source de `analysis-core` (absence d'import/appel vers
+`java.time.LocalDate.now`, `java.time.Clock`) ; automatisable par Analyse (règle statique dédiée)
+si un tel outillage est introduit côté application.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-NRF-003]
+==== MFB-ANA-NRF-003 — Absence de performance de placements dans le contrat
+
+Le contrat d'entrée et le résultat du silo Analyse ne transportent aucune donnée de performance
+de placement : seule la nature d'une ligne (`"placement"`, via `BudgetLineKind`) est connue du
+moteur. L'introduction d'un tel usage nécessitera une évolution explicite du contrat d'entrée.
+
+NOTE: C'est une décision de périmètre du contrat (ce qu'il NE transporte PAS), garantie par la
+structure même des types Java plutôt qu'observable comme un comportement de calcul.
+
+Vérification:: Inspection — lecture des déclarations de `AnalyseInput` et `AnalyseResultModel`
+dans `analysis-api` (et de leurs sous-types), confirmant l'absence d'un tel champ.
+
+Amont:: SILO-133 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-ANA-NRF-004]
+==== MFB-ANA-NRF-004 — Pureté du moteur de calcul
+
+`analysis-core` ne déclare, en dépendance de production, aucune bibliothèque Spring, JPA,
+OpenAPI ou serveur web : seul `analysis-api` est requis à l'exécution.
+
+Vérification:: Inspection — lecture de `analysis-core/pom.xml` (section `<dependencies>`).
+
+Amont:: SILO-155 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-ANA-NRF-005]
+==== MFB-ANA-NRF-005 — Séparation API / implémentation
+
+Le contrat (`AnalyseCalculationService`, types d'entrée/sortie) vit dans `analysis-api` ; son
+implémentation (`DefaultAnalyseCalculationService`) vit dans `analysis-core` et n'est visible que
+du composition root de l'application (le module `application` ne dépend que de `analysis-api`).
+
+Vérification:: Inspection — lecture de la structure des modules et, côté MyFamilyBudget (hors de
+ce dépôt), de `application/pom.xml` (absence de dépendance vers `analysis-core`).
+
+Amont:: SILO-155 (MyFamilyBudget, `doc/architecture/21-plan-silotage.md`)
+
+[#MFB-ANA-NRF-006]
+==== MFB-ANA-NRF-006 — Stabilité binaire de l'API publiée
+
+Toute évolution binaire incompatible et non souhaitée des classes publiées de `analysis-api`
+fait échouer le build (`japicmp-maven-plugin`, `breakBuildOnBinaryIncompatibleModifications`).
+
+Vérification:: Analyse — comparaison binaire outillée (`japicmp-maven-plugin`) entre la version
+publiée précédente et la version en cours de build.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-NRF-007]
+==== MFB-ANA-NRF-007 — Environnement de compilation
+
+Le dépôt compile en Java 21 (`maven.compiler.release = 21`), encodage source et rapport imposé
+en UTF-8.
+
+Vérification:: Inspection — lecture des propriétés de `pom.xml`.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-NRF-008]
+==== MFB-ANA-NRF-008 — Versionnage SemVer et cycle SNAPSHOT/release
+
+Le dépôt respecte SemVer 2.0.0 strict (`x.y.z`, jamais de range ni de `LATEST`/`RELEASE`). En
+continu, `pom.xml` reste en `x.y.z-SNAPSHOT` et chaque push sur `main` republie ce SNAPSHOT sur
+GitHub Packages (job `publish-snapshot`) ; une release n'est produite que par la pose d'un tag
+`vX.Y.Z` (job `release`), avec garde-fou bloquant si la version du `pom.xml` est encore en
+SNAPSHOT ou ne correspond pas exactement au tag.
+
+Vérification:: Démonstration — exécution du pipeline `ci.yml` sur un push `main` et sur la pose
+d'un tag `vX.Y.Z`, observation des garde-fous et de la publication effective sur GitHub Packages.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-NRF-009]
+==== MFB-ANA-NRF-009 — Non-réécriture d'une version publiée
+
+Une version déjà publiée sur GitHub Packages n'est jamais republiée ni corrigée en place ; toute
+anomalie post-publication donne lieu à une nouvelle version corrective (tags `v*` protégés contre
+suppression et déplacement).
+
+Vérification:: Inspection — vérification de la configuration du GitHub Ruleset
+`protect-release-tags` sur le dépôt.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-NRF-010]
+==== MFB-ANA-NRF-010 — Documentation d'exigences au format AsciiDoc
+
+Les exigences fonctionnelles et non fonctionnelles de ce silo sont documentées dans ce fichier
+(`doc/srs.adoc`), sous forme de fragment sans titre de document, afin d'être concaténées sans
+retraitement dans le SRS consolidé de l'application (`include::`, avec ajustement de
+`leveloffset` par le document maître) et de servir de base à la génération d'une matrice de
+traçabilité exigences ↔ tests.
+
+Vérification:: Inspection — lecture du fichier, vérification de l'absence de titre de document
+de niveau 0 (`= ...`).
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-NRF-011]
+==== MFB-ANA-NRF-011 — Unicité des identifiants d'exigence
+
+Chaque identifiant `MFB-ANA-RF-nnn` / `MFB-ANA-NRF-nnn` est unique dans ce dépôt et ne doit
+jamais être réutilisé pour une exigence différente, y compris après suppression d'une exigence
+obsolète (le numéro est alors retiré, jamais réaffecté).
+
+Vérification:: Inspection — revue du fichier, absence de doublon d'ancre/identifiant.
+
+Amont:: Aucune (exigence propre à ce dépôt)
+
+[#MFB-ANA-NRF-012]
+==== MFB-ANA-NRF-012 — Cohérence du préfixe applicatif
+
+Le préfixe `MFB-` est commun à l'ensemble des silos de l'application (dépôt `MyFamilyBudget` et
+ses onze dépôts satellites) afin que la concaténation de leurs exigences respectives au niveau
+applicatif produise un espace d'identifiants homogène et sans collision.
+
+Vérification:: Inspection — revue croisée des identifiants utilisés dans les `srs.adoc`/`irs.adoc`
+des différents dépôts satellites, au moment de leur concaténation.
+
+Amont:: Aucune (exigence propre à ce dépôt)

@@ -6,7 +6,7 @@
 
     <groupId>com.moe.myfamilybudget</groupId>
     <artifactId>domain-analysis</artifactId>
-    <version>0.0.1</version>
+    <version>0.0.2-SNAPSHOT</version>
     <packaging>pom</packaging>
     <name>domain-analysis</name>
     <description>Silo Analyse MyFamilyBudget (API et Core) - Dépôt autonome</description>

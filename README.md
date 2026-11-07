@@ -7,6 +7,18 @@ Dépôt autonome contenant les contrats et l'implémentation métier du domaine 
 - **`analysis-api`** : contrats, modèles, interface de service. Purement JDK (sans dépendance externe Spring ni JPA).
 - **`analysis-core`** : moteur de calcul pur, sans Spring ni JPA.
 
+## Documentation des exigences
+
+- [`doc/srs.adoc`](doc/srs.adoc) : exigences fonctionnelles et non fonctionnelles du silo
+  (Software Requirements Specification), chacune avec sa méthode de vérification
+  (Inspection / Analyse / Démonstration / Test).
+- [`doc/irs.adoc`](doc/irs.adoc) : interface entre ce silo et l'application MyFamilyBudget
+  (Interface Requirements Specification).
+
+Ces deux fichiers sont des fragments AsciiDoc sans titre de document, destinés à être concaténés
+(`include::`) dans la documentation consolidée de l'application pour produire un PDF et une
+matrice de traçabilité exigences ↔ tests.
+
 ## Compilation et tests
 
 ```bash
